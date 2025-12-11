@@ -3,7 +3,7 @@ pipeline {
 
   options {
     timestamps()
-    ansiColor('xterm')
+    ansiColor('xterm')        // ok since you installed the plugin
     buildDiscarder(logRotator(numToKeepStr: '20'))
     durabilityHint('PERFORMANCE_OPTIMIZED')
   }
@@ -19,16 +19,12 @@ pipeline {
   }
 
   environment {
-    // Jenkins Credentials you must create:
-    // 1) AZURE_SP_JSON: Secret text credential containing the raw JSON of your Service Principal:
-    //    {"clientId":"...","clientSecret":"...","tenantId":"..."}
-    // 2) SEMGREP_APP_TOKEN (optional but recommended): Secret text
+    // 1) Required: Jenkins secret text containing SP JSON
     AZURE_SP_JSON = credentials('AZURE_SP_JSON')
-    SEMGREP_APP_TOKEN = credentials('SEMGREP_APP_TOKEN')
+    // 2) Optional: remove to avoid failing if not present
+    // SEMGREP_APP_TOKEN = credentials('SEMGREP_APP_TOKEN')
     VENV = '.venv'
-    // Staging URL pattern: https://<appname>-<slot>.azurewebsites.net
     STAGING_URL = "https://${AZ_FUNCTIONAPP}-${AZ_SLOT}.azurewebsites.net"
-    // Paths for reports
     REPORT_DIR = "build-reports"
   }
 
@@ -47,20 +43,15 @@ pipeline {
         sh """
           python${PY_VERSION} -V || true
           which python${PY_VERSION} || true
-
-          # Prefer pyenv/available python; fallback to 'python3'
           PYBIN=\$(command -v python${PY_VERSION} || command -v python3 || command -v python)
           echo "Using PYBIN=\$PYBIN"
           \$PYBIN -m venv ${VENV}
           . ${VENV}/bin/activate
           python -V
           pip install --upgrade pip wheel
-          # Project deps
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Tooling
           pip install ruff==0.7.2 black==24.8.0 pytest pytest-cov pytest-html \
                      bandit==1.7.9 pip-audit==2.* junitparser
-          # semgrep via pip (works fine in CI)
           pip install semgrep==1.* || true
         """
       }
@@ -106,11 +97,8 @@ pipeline {
       steps {
         sh """
           . ${VENV}/bin/activate
-          # Bandit
           bandit -q -r . -f xml -o ${REPORT_DIR}/bandit.xml || true
-          # Semgrep (community rules)
           semgrep --error --config p/ci --json --output ${REPORT_DIR}/semgrep.json || true
-          # Optional SCA
           if [ "${ENABLE_PIP_AUDIT}" = "true" ]; then
             pip-audit -r requirements.txt -f json -o ${REPORT_DIR}/pip-audit.json || true
           fi
@@ -119,7 +107,8 @@ pipeline {
       post {
         always {
           archiveArtifacts artifacts: "${REPORT_DIR}/bandit.xml, ${REPORT_DIR}/semgrep.json, ${REPORT_DIR}/pip-audit.json", allowEmptyArchive: true
-      }}
+        }
+      }
     }
 
     stage('Build: Package ZIP') {
@@ -128,11 +117,9 @@ pipeline {
           mkdir -p dist
           ZIP=dist/functionapp.zip
           rm -f \$ZIP
-          # Create clean temp dir to avoid packing junk
-          rsync -a --exclude '.git' --exclude '.venv' --exclude 'dist' --exclude '${REPORT_DIR}' \
-                 --exclude 'local.settings.json' --exclude 'tests' --exclude 'Jenkinsfile' \
-                 ./ dist/stage/
-          (cd dist/stage && zip -r ../functionapp.zip .)
+          # Pack repo with exclusions (no rsync needed)
+          zip -r \$ZIP . \
+            -x '.git/*' '.venv/*' 'dist/*' '${REPORT_DIR}/*' 'local.settings.json' 'tests/*' 'Jenkinsfile'
           echo "Built artifact: \$ZIP"
         """
       }
@@ -146,7 +133,6 @@ pipeline {
     stage('Azure Login') {
       steps {
         sh """
-          # Expect az CLI available on agent. If not, install or use an agent image with az preinstalled.
           echo '${AZURE_SP_JSON}' > sp.json
           CLIENT_ID=\$(jq -r .clientId sp.json)
           CLIENT_SECRET=\$(jq -r .clientSecret sp.json)
@@ -164,20 +150,17 @@ pipeline {
     stage('Deploy to Staging Slot') {
       steps {
         sh """
-          # Ensure slot exists
           if ! az functionapp deployment slot list -g "${AZ_RESOURCE_GROUP}" -n "${AZ_FUNCTIONAPP}" | jq -e '.[] | select(.name==\"${AZ_SLOT}\")' >/dev/null; then
             echo "Creating slot ${AZ_SLOT}..."
             az functionapp deployment slot create -g "${AZ_RESOURCE_GROUP}" -n "${AZ_FUNCTIONAPP}" --slot "${AZ_SLOT}"
           fi
 
-          # Zip deploy
           az functionapp deployment source config-zip \
               --resource-group "${AZ_RESOURCE_GROUP}" \
               --name "${AZ_FUNCTIONAPP}" \
               --slot "${AZ_SLOT}" \
               --src dist/functionapp.zip
 
-          # Warmup ping (retry a few times)
           for i in 1 2 3 4 5; do
             curl -sSf "${STAGING_URL}/api/health" && break || sleep 5
           done || true
@@ -189,12 +172,11 @@ pipeline {
       when { expression { return params.RUN_DAST } }
       steps {
         sh """
-          # Requires Docker on the Jenkins agent
           mkdir -p ${REPORT_DIR}
-          # Use provided zap-baseline.conf at repo root
           TARGET="${STAGING_URL}"
           echo "Scanning target: \$TARGET"
 
+          # NOTE: This requires Docker-in-Docker; keep RUN_DAST=false in Jenkins for now.
           docker run --rm --network host \
             -v "\$PWD/zap-baseline.conf:/zap/wrk/zap-baseline.conf:ro" \
             -v "\$PWD/${REPORT_DIR}:/zap/wrk" \
@@ -207,7 +189,6 @@ pipeline {
               -m 5 \
               -z "-config api.key=" || true
 
-          # Fail build on High alerts
           if grep -q "High" ${REPORT_DIR}/zap.md; then
             echo "ZAP found High risk alerts. Failing."
             exit 1
@@ -244,7 +225,7 @@ pipeline {
 
   post {
     always {
-      sh 'echo "Build finished with status: ${currentBuild.currentResult}"'
+      echo "Build finished with status: ${currentBuild.currentResult}"
     }
   }
 }
