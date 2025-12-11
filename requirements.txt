@@ -1,0 +1,7 @@
+azure-functions
+azure-data-tables==12.6.0
+azure-identity==1.17.1
+requests>=2.31.0
+tenacity==8.2.3
+pybreaker==1.4.1
+opencensus-ext-azure==1.1.9
