@@ -1,6 +1,6 @@
 # function_app.py — Azure Functions Python v2 (single file)
-# Features: HTTP API + Timer pre-warm, API key auth, per-minute rate limit,
-# Azure Table Storage cache, retry + circuit breaker, Open-Meteo provider (current + hourly fallback).
+# HTTP API + Timer pre-warm, API key auth, per-minute rate limit,
+# Azure Table Storage cache, retry + circuit breaker, Open-Meteo provider.
 
 import json
 import os
@@ -9,6 +9,9 @@ import hashlib
 import requests
 import pybreaker
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# ✅ add this so we can use AuthLevel enum (prevents 404 routing confusion)
+import azure.functions as func
 
 from azure.functions import FunctionApp, HttpRequest, HttpResponse, TimerRequest
 from azure.data.tables import TableServiceClient, UpdateMode
@@ -84,8 +87,7 @@ breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
 @breaker
 def fetch_provider(lat: float, lon: float) -> dict:
     """
-    Use Open-Meteo current + hourly. If 'current' is absent, we'll build a snapshot from hourly.
-    Field names follow the new schema: relative_humidity_2m, wind_speed_10m, etc.
+    Use Open-Meteo current + hourly. If 'current' is absent, build a snapshot from hourly.
     """
     params = {
         "latitude": lat,
@@ -187,7 +189,7 @@ def clear_cache(city: str):
 # -------------------------
 # HTTP API
 # -------------------------
-@app.route(route="WeatherFunction", auth_level="ANONYMOUS")
+@app.route(route="WeatherFunction", auth_level=func.AuthLevel.ANONYMOUS)
 def weather(req: HttpRequest) -> HttpResponse:
     # 1) auth
     if not check_api_key(req):
@@ -264,10 +266,18 @@ def warm_cache(mytimer: TimerRequest):
             requests.get(base, params={"city": c}, headers={"x-api-key": key}, timeout=5)
         except Exception:
             pass
-        @app.route(route="health", auth_level="anonymous")
+
+# -------------------------
+# Health Check Endpoint (for warmup + probes)
+# -------------------------
+@app.route(route="health", auth_level=func.AuthLevel.ANONYMOUS)
 def health(req: HttpRequest) -> HttpResponse:
     return HttpResponse(
-        json.dumps({"status": "ok", "time": str(datetime.datetime.utcnow())}),
+        json.dumps({
+            "status": "ok",
+            "time": str(datetime.datetime.utcnow()),
+            "service": "weather-api"
+        }),
         status_code=200,
         mimetype="application/json"
     )
