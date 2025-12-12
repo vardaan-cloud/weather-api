@@ -23,16 +23,19 @@ pipeline {
       }
     }
 
-    stage('Setup Python (for packaging only)') {
-      steps {
-        sh '''
-          python3 -m venv .venv
-          . .venv/bin/activate
-          pip install --upgrade pip wheel
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        '''
-      }
-    }
+    stage('Setup Python') {
+  steps {
+    sh '''
+      python3 -m venv .venv
+      . .venv/bin/activate
+      python -V
+      python -m pip install --upgrade pip setuptools wheel
+      # install deps (retry once, no cache)
+      pip install --no-cache-dir -r requirements.txt || (sleep 3 && pip install --no-cache-dir -r requirements.txt)
+    '''
+  }
+}
+
 
     stage('Build ZIP') {
       steps {
