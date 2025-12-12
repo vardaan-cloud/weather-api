@@ -36,7 +36,7 @@ pipeline {
     stage('Set up Python') {
       steps {
         sh """
-          PYBIN=\$(command -v python${PY_VERSION} || command -v python3 || command -v python)
+          PYBIN=$(command -v python3)
           echo "Using PYBIN=\$PYBIN"
           \$PYBIN -m venv ${VENV}
           . ${VENV}/bin/activate
