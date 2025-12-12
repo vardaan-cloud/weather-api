@@ -14,7 +14,7 @@ pipeline {
     string(name: 'AZ_RESOURCE_GROUP', defaultValue: 'rg-free-auto',  description: 'Resource Group')
     string(name: 'AZ_FUNCTIONAPP',    defaultValue: 'vardaan-weather-api', description: 'Function App name')
     string(name: 'AZ_SLOT',           defaultValue: 'staging',       description: 'Deployment slot')
-    string(name: 'WARMUP_PATH',       defaultValue: '/',             description: 'Path to ping after deploy')
+    string(name: 'WARMUP_PATH',       defaultValue: '/',             description: 'Path for warmup')
   }
 
   environment {
@@ -25,6 +25,7 @@ pipeline {
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         deleteDir()
@@ -35,80 +36,90 @@ pipeline {
 
     stage('Set up Python') {
       steps {
-        sh """
+        sh '''
           PYBIN=$(command -v python3)
-          echo "Using PYBIN=\$PYBIN"
-          \$PYBIN -m venv ${VENV}
-          . ${VENV}/bin/activate
+          echo "Using PYBIN=$PYBIN"
+          $PYBIN -m venv .venv
+          . .venv/bin/activate
           python -V
           pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        """
+        '''
       }
     }
 
     stage('Build ZIP') {
       steps {
-        sh """
+        sh '''
           mkdir -p dist
           ZIP=dist/functionapp.zip
-          rm -f \$ZIP
-          # Pack everything needed for Azure Functions
-          zip -r \$ZIP . \
-            -x '.git/*' '.venv/*' 'dist/*' '${REPORT_DIR}/*' 'local.settings.json' 'tests/*' 'Jenkinsfile'
-          echo "Built artifact: \$ZIP"
-        """
+          rm -f "$ZIP"
+
+          zip -r "$ZIP" . \
+            -x "*.git*" ".venv/*" "dist/*" "build-reports/*" "local.settings.json" "tests/*" "Jenkinsfile"
+
+          echo "Built ZIP: $ZIP"
+        '''
       }
-      post { success { archiveArtifacts artifacts: 'dist/functionapp.zip', fingerprint: true } }
+      post {
+        success { archiveArtifacts artifacts: 'dist/functionapp.zip', fingerprint: true }
+      }
     }
 
     stage('Azure Login') {
       steps {
-        sh """
-          echo '${AZURE_SP_JSON}' > sp.json
-          CLIENT_ID=\$(jq -r .clientId sp.json)
-          CLIENT_SECRET=\$(jq -r .clientSecret sp.json)
-          TENANT_ID=\$(jq -r .tenantId sp.json)
+        sh '''
+          echo "$AZURE_SP_JSON" > sp.json
 
-          az config set extension.use_dynamic_install=yes_without_prompt
-          az login --service-principal -u \$CLIENT_ID -p \$CLIENT_SECRET --tenant \$TENANT_ID
-          az account set --subscription "${AZ_SUBSCRIPTION}"
+          CLIENT_ID=$(jq -r .clientId sp.json)
+          CLIENT_SECRET=$(jq -r .clientSecret sp.json)
+          TENANT_ID=$(jq -r .tenantId sp.json)
+
+          az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID"
+          az account set --subscription "$AZ_SUBSCRIPTION"
           az account show
-        """
+        '''
       }
     }
 
     stage('Deploy to Staging Slot') {
       steps {
-        sh """
-          # Ensure slot exists
-          if ! az functionapp deployment slot list -g "${AZ_RESOURCE_GROUP}" -n "${AZ_FUNCTIONAPP}" | jq -e '.[] | select(.name==\"${AZ_SLOT}\")' >/dev/null; then
-            echo "Creating slot ${AZ_SLOT}..."
-            az functionapp deployment slot create -g "${AZ_RESOURCE_GROUP}" -n "${AZ_FUNCTIONAPP}" --slot "${AZ_SLOT}"
+        sh '''
+          SLOT_EXISTS=$(az functionapp deployment slot list -g "$AZ_RESOURCE_GROUP" -n "$AZ_FUNCTIONAPP" | jq -r --arg SLOT "$AZ_SLOT" '.[] | select(.name==$SLOT) | .name')
+
+          if [ -z "$SLOT_EXISTS" ]; then
+            echo "Creating slot $AZ_SLOT..."
+            az functionapp deployment slot create -g "$AZ_RESOURCE_GROUP" -n "$AZ_FUNCTIONAPP" --slot "$AZ_SLOT"
           fi
 
           az functionapp deployment source config-zip \
-            --resource-group "${AZ_RESOURCE_GROUP}" \
-            --name "${AZ_FUNCTIONAPP}" \
-            --slot "${AZ_SLOT}" \
+            --resource-group "$AZ_RESOURCE_GROUP" \
+            --name "$AZ_FUNCTIONAPP" \
+            --slot "$AZ_SLOT" \
             --src dist/functionapp.zip
-        """
+        '''
       }
     }
 
     stage('Warmup') {
       steps {
-        sh """
+        sh '''
           URL="${BASE_URL}${WARMUP_PATH}"
-          echo "Warming up: \$URL"
+          echo "Warming up URL: $URL"
+
           for i in 1 2 3 4 5; do
-            curl -sS -o /dev/null -w "%{http_code}\\n" "\$URL" && break || sleep 5
+            curl -sSf "$URL" && break || sleep 5
           done || true
-          echo "Visit: \$URL"
-        """
+
+          echo "Warmup complete."
+        '''
       }
     }
   }
 
-  post { always { echo "Build finished with status: ${currentBuild.currentResult}" } }
+  post {
+    always {
+      echo "Build finished with status: ${currentBuild.currentResult}"
+    }
+  }
 }
