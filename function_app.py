@@ -264,3 +264,10 @@ def warm_cache(mytimer: TimerRequest):
             requests.get(base, params={"city": c}, headers={"x-api-key": key}, timeout=5)
         except Exception:
             pass
+        @app.route(route="health", auth_level="anonymous")
+def health(req: HttpRequest) -> HttpResponse:
+    return HttpResponse(
+        json.dumps({"status": "ok", "time": str(datetime.datetime.utcnow())}),
+        status_code=200,
+        mimetype="application/json"
+    )
